@@ -1,0 +1,46 @@
+[package]
+name = "dsync"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "A fast, rsync-inspired directory sync tool (local and remote-over-SSH)"
+
+[[bin]]
+name = "dsync"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+ignore = "0.4"
+walkdir = "2"
+fast_rsync = "0.2"
+memmap2 = "0.9"
+blake3 = "1"
+zstd = "0.13"
+russh = "0.61"
+russh-sftp = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "process", "fs", "sync", "net"] }
+rayon = "1"
+indicatif = "0.18"
+dialoguer = "0.11"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+postcard = { version = "1", features = ["use-std"] }
+async-trait = "0.1"
+num_cpus = "1"
+dirs = "5"
+filetime = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+rand = "0.8"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
