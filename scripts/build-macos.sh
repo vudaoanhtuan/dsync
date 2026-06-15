@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Build a universal (arm64 + x86_64) macOS binary. macOS has no true static libc; the binary is
-# self-contained apart from system libraries (the platform norm). See specs/testing-and-build.md.
+# Build macOS binaries: arm64 (Apple Silicon), x86_64 (Intel), and a universal (arm64 + x86_64)
+# binary. macOS has no true static libc; the binaries are self-contained apart from system
+# libraries (the platform norm). See specs/testing-and-build.md.
 set -euo pipefail
 
 DIST="dist"
-OUT="$DIST/dsync-macos-universal"
+OUT_ARM="$DIST/dsync-macos-arm64"
+OUT_AMD="$DIST/dsync-macos-amd64"
+OUT_UNIVERSAL="$DIST/dsync-macos-universal"
 
 echo "==> Adding targets"
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -14,15 +17,25 @@ cargo build --release --target aarch64-apple-darwin
 cargo build --release --target x86_64-apple-darwin
 
 mkdir -p "$DIST"
+
+echo "==> Copying per-architecture binaries"
+cp target/aarch64-apple-darwin/release/dsync "$OUT_ARM"
+cp target/x86_64-apple-darwin/release/dsync "$OUT_AMD"
+
 echo "==> Creating universal binary with lipo"
 lipo -create \
-  target/aarch64-apple-darwin/release/dsync \
-  target/x86_64-apple-darwin/release/dsync \
-  -output "$OUT"
+  "$OUT_ARM" \
+  "$OUT_AMD" \
+  -output "$OUT_UNIVERSAL"
 
 echo "==> Verifying"
-lipo -info "$OUT"
-file "$OUT"
+for OUT in "$OUT_ARM" "$OUT_AMD" "$OUT_UNIVERSAL"; do
+  lipo -info "$OUT"
+  file "$OUT"
+done
 
-SIZE="$(du -h "$OUT" | cut -f1)"
-echo "==> Done: $OUT ($SIZE)"
+echo "==> Done:"
+for OUT in "$OUT_ARM" "$OUT_AMD" "$OUT_UNIVERSAL"; do
+  SIZE="$(du -h "$OUT" | cut -f1)"
+  echo "    $OUT ($SIZE)"
+done
