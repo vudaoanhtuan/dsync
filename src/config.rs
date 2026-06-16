@@ -383,9 +383,9 @@ mod tests {
     #[test]
     fn parse_ssh_user_host() {
         assert_eq!(
-            Remote::parse("tuan@server.com:/srv/app").unwrap(),
+            Remote::parse("user@server.com:/srv/app").unwrap(),
             Remote::Ssh {
-                user: Some("tuan".into()),
+                user: Some("user".into()),
                 host: "server.com".into(),
                 port: 22,
                 path: PathBuf::from("/srv/app"),

@@ -3,12 +3,13 @@
 //! length-prefixed protocol (protocol.rs) carries scan/signature/diff/patch so the CPU-heavy
 //! work happens locally to the remote files. See specs/transport.md.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use russh::client::{self, Handle};
+use russh::client::{self, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::PrivateKeyWithHashAlg;
 use russh::ChannelStream;
 use tokio::sync::{Mutex, Semaphore};
@@ -18,7 +19,7 @@ use crate::delta::{Delta, Signature};
 use crate::error::{DsyncError, Result};
 use crate::ignore::IgnoreSet;
 use crate::transport::protocol::{read_msg, write_msg, Request, Response, PROTOCOL_VERSION};
-use crate::transport::{FileEntry, Transport};
+use crate::transport::{ssh_config, FileEntry, Transport};
 
 /// Host-key verification handler. Consults `~/.ssh/known_hosts`; refuses unknown hosts rather
 /// than blindly trusting them.
@@ -104,14 +105,16 @@ pub struct SshTransport {
 
 impl SshTransport {
     /// Connect, authenticate, and open a pool of `channels` agent processes rooted at the remote
-    /// path. `compress`/`level` control wire compression for this run.
+    /// path. `compress`/`level` control wire compression for this run. `quiet` suppresses the
+    /// interactive password prompt (so `--quiet`/automation never blocks on input).
     pub async fn connect(
         remote: &Remote,
         channels: usize,
         compress: bool,
         level: i32,
+        quiet: bool,
     ) -> Result<SshTransport> {
-        let (user, host, port, path) = match remote {
+        let (user_arg, host_token, port_arg, path) = match remote {
             Remote::Ssh {
                 user,
                 host,
@@ -122,7 +125,22 @@ impl SshTransport {
                 return Err(DsyncError::Ssh("not an SSH remote".into()))
             }
         };
-        let user = user.unwrap_or_else(whoami);
+
+        // Resolve the host token against ~/.ssh/config (it may be a `Host` alias). Precedence:
+        // explicit remote-string value > ssh_config > built-in default. The parsed `port == 22`
+        // is treated as "not explicitly set" so an ssh_config `Port` is honored.
+        let sshcfg = ssh_config::resolve(&host_token);
+        let host = sshcfg.hostname.clone().unwrap_or(host_token);
+        let user = user_arg.or(sshcfg.user).unwrap_or_else(whoami);
+        let port = if port_arg != 22 {
+            port_arg
+        } else {
+            sshcfg.port.unwrap_or(22)
+        };
+        let identity = sshcfg.identity_file;
+
+        // A password prompt is only acceptable on an interactive terminal and when not quiet.
+        let allow_password = !quiet && std::io::stdin().is_terminal();
 
         let config = Arc::new(client::Config::default());
         let handler = ClientHandler {
@@ -133,7 +151,7 @@ impl SshTransport {
             .await
             .map_err(|e| DsyncError::Ssh(format!("connect to {host}:{port} failed: {e}")))?;
 
-        authenticate(&mut session, &user).await?;
+        authenticate(&mut session, &user, &host, identity.as_deref(), allow_password).await?;
 
         let n = channels.max(1);
         let mut idle = Vec::with_capacity(n);
@@ -174,16 +192,29 @@ fn whoami() -> String {
         .unwrap_or_else(|_| "root".to_string())
 }
 
-/// Authenticate: ssh-agent first, then common key files.
-async fn authenticate(session: &mut Handle<ClientHandler>, user: &str) -> Result<()> {
+/// Authenticate in order: ssh-agent, then key files (ssh_config `IdentityFile` first, then the
+/// `id_ed25519`/`id_rsa` defaults), then — only on an interactive terminal — an interactive
+/// password prompt (with a keyboard-interactive fallback). See specs/transport.md.
+async fn authenticate(
+    session: &mut Handle<ClientHandler>,
+    user: &str,
+    host: &str,
+    identity: Option<&Path>,
+    allow_password: bool,
+) -> Result<()> {
     if try_agent_auth(session, user).await.unwrap_or(false) {
         return Ok(());
     }
-    if try_key_files(session, user).await? {
+    if try_key_files(session, user, identity).await? {
+        return Ok(());
+    }
+    if allow_password && try_password_auth(session, user, host).await? {
         return Ok(());
     }
     Err(DsyncError::Ssh(format!(
-        "authentication failed for {user}; tried ssh-agent and ~/.ssh/id_ed25519, id_rsa"
+        "authentication failed for {user}; tried ssh-agent, key files \
+         (id_ed25519/id_rsa + ssh_config IdentityFile), and password \
+         (a password prompt is only shown on an interactive terminal)"
     )))
 }
 
@@ -213,13 +244,25 @@ async fn try_agent_auth(session: &mut Handle<ClientHandler>, user: &str) -> Resu
     Ok(false)
 }
 
-async fn try_key_files(session: &mut Handle<ClientHandler>, user: &str) -> Result<bool> {
+async fn try_key_files(
+    session: &mut Handle<ClientHandler>,
+    user: &str,
+    identity: Option<&Path>,
+) -> Result<bool> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    for name in ["id_ed25519", "id_rsa"] {
-        let path = home.join(".ssh").join(name);
+    // ssh_config IdentityFile (if any) is tried ahead of the built-in defaults.
+    let mut paths: Vec<PathBuf> = Vec::new();
+    if let Some(id) = identity {
+        paths.push(id.to_path_buf());
+    }
+    paths.push(home.join(".ssh").join("id_ed25519"));
+    paths.push(home.join(".ssh").join("id_rsa"));
+
+    for path in paths {
         if !path.exists() {
             continue;
         }
+        // Passphrase-protected keys that fail to load non-interactively are skipped, not fatal.
         let key = match russh::keys::load_secret_key(&path, None) {
             Ok(k) => k,
             Err(_) => continue,
@@ -231,6 +274,61 @@ async fn try_key_files(session: &mut Handle<ClientHandler>, user: &str) -> Resul
         }
     }
     Ok(false)
+}
+
+/// Prompt once (hidden input) for a password, then try `password` auth and fall back to
+/// `keyboard-interactive` (which is all some servers, including many cloud VMs, offer). The
+/// prompt is read on a blocking thread so it doesn't stall the async runtime.
+async fn try_password_auth(
+    session: &mut Handle<ClientHandler>,
+    user: &str,
+    host: &str,
+) -> Result<bool> {
+    let prompt = format!("{user}@{host}'s password");
+    let password = match tokio::task::spawn_blocking(move || {
+        dialoguer::Password::new().with_prompt(prompt).interact()
+    })
+    .await
+    {
+        Ok(Ok(p)) => p,
+        // Join error, or the user aborted / no TTY available at read time.
+        _ => return Ok(false),
+    };
+
+    if let Ok(res) = session.authenticate_password(user, password.clone()).await {
+        if res.success() {
+            return Ok(true);
+        }
+    }
+    try_keyboard_interactive(session, user, &password).await
+}
+
+/// Keyboard-interactive fallback: answer every server prompt with the same password.
+async fn try_keyboard_interactive(
+    session: &mut Handle<ClientHandler>,
+    user: &str,
+    password: &str,
+) -> Result<bool> {
+    let mut resp = match session
+        .authenticate_keyboard_interactive_start(user.to_string(), None)
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return Ok(false),
+    };
+    loop {
+        match resp {
+            KeyboardInteractiveAuthResponse::Success => return Ok(true),
+            KeyboardInteractiveAuthResponse::Failure { .. } => return Ok(false),
+            KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => {
+                let answers = vec![password.to_string(); prompts.len()];
+                resp = match session.authenticate_keyboard_interactive_respond(answers).await {
+                    Ok(r) => r,
+                    Err(_) => return Ok(false),
+                };
+            }
+        }
+    }
 }
 
 async fn open_agent_channel(

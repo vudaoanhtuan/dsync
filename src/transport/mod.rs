@@ -4,6 +4,7 @@
 pub mod local;
 pub mod protocol;
 pub mod ssh;
+pub mod ssh_config;
 
 use std::path::{Path, PathBuf};
 

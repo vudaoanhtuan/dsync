@@ -36,7 +36,7 @@ user's own git repo. `dsync` itself also always ignores `.dsync/` during sync (s
 # `default`; add more with `dsync remote add <name> <path>`.
 remote:
   default: /backup/myproject
-  staging: tuan@server.com:/srv/app
+  staging: user@server.com:/srv/app
 
 # Optional. Multiline gitignore-syntax patterns. Default: empty.
 ignore: |
@@ -97,12 +97,21 @@ impl Remote {
 Parsing rules (checked in order):
 1. If `s` matches `[user@]host:path` **and** the part before the first `:` is not an existing
    local path and not a Windows drive letter → `Ssh`. Examples:
-   - `tuan@server.com:/srv/app` → user=tuan, host=server.com, port=22, path=/srv/app
+   - `myuser@server.com:/srv/app` → user=myuser, host=server.com, port=22, path=/srv/app
    - `server.com:relative/path` → user=None (use ssh config / current user), path relative to
      the remote login home.
+   - `myvm:/data/test` → `Ssh { user: None, host: "myvm", port: 22, path: /data/test }`, where
+     `host` may be an `~/.ssh/config` `Host` **alias**.
    - `[2001:db8::1]:/path` → bracketed IPv6 host.
 2. Custom SSH port via `ssh://user@host:2222/path` URL form, or rely on `~/.ssh/config`.
 3. Otherwise → `Local { path }`. Relative local paths resolve against cwd at sync time.
+
+**`Remote::parse` does not touch the filesystem.** It never reads `~/.ssh/config`, so the parsed
+`host` may be a literal hostname *or* an alias, and `user=None` / `port=22` are placeholders
+meaning "defer to ssh_config, then to the current OS user / port 22". The alias and any
+ssh_config `HostName`/`User`/`Port`/`IdentityFile` are resolved later by `SshTransport` at
+connect time, where an explicit `user@` or `ssh://…:port` always wins over ssh_config (see
+[transport.md](transport.md)).
 
 ## Managing remotes (`dsync remote …`)
 The `remote` map is edited only through these commands (and seeded by `init`); the CLI surface

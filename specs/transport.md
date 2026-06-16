@@ -76,10 +76,50 @@ trait and the wire protocol in agreement and avoids an extra SSH round-trip per 
 
 ## `SshTransport` (`src/transport/ssh.rs`)
 - Built from `Remote::Ssh` (spec 2).
-- **Connect:** `russh` client; auth in this order — ssh-agent, then key files
-  (`~/.ssh/id_ed25519`, `id_rsa`), honoring `~/.ssh/config` for host/user/port/identity.
-  Verify host key against `~/.ssh/known_hosts`; on unknown host, error with guidance (no blind
-  trust).
+- **Verify host key** against `~/.ssh/known_hosts`; on unknown host, error with guidance (no
+  blind trust).
+
+### Resolving the target (`~/.ssh/config`)
+The `Remote::Ssh` `host` field may be an OpenSSH `Host` alias (e.g. `myvm:/data/test` →
+`host = "myvm"`). Before connecting, `SshTransport::connect` (or a helper it calls) reads
+`~/.ssh/config` and resolves the alias. `Remote::parse` itself stays filesystem-free — all
+ssh_config lookup happens here, at connect time (see [config.md](config.md)).
+
+Resolved fields:
+- `HostName` → the actual TCP host to connect to. If no alias matches, the token is used
+  literally as the hostname.
+- `User` → login user, used **only when the remote string did not specify one**.
+- `Port` → connect port, used **only when not given via the `ssh://…:port` URL form**.
+- `IdentityFile` → an additional private-key path, tried during key-file auth (below) **ahead
+  of** the built-in `id_ed25519`/`id_rsa` defaults.
+
+Precedence for every field: **explicit remote-string value > `~/.ssh/config` > built-in
+default** (current OS user, port 22). A missing `~/.ssh/config`, or an alias with no match, is
+**not an error** — fall back to the literal token and the built-in defaults.
+
+### Authentication (in order)
+`russh` client; each method is tried until one succeeds:
+1. **ssh-agent** — every identity offered by the agent.
+2. **Key files** — the ssh_config `IdentityFile` (if any), then `~/.ssh/id_ed25519`, then
+   `~/.ssh/id_rsa`. Passphrase-protected keys that fail to load are skipped, not fatal.
+3. **Interactive password prompt (new)** — only if 1–2 all fail **and** stdin is an interactive
+   TTY. Read the password with hidden input (reuse `dialoguer`'s `Password`, already a
+   dependency, or `rpassword`). Attempt `russh`'s `authenticate_password`; if the server offers
+   only `keyboard-interactive` (common on cloud VMs, including GCP), fall back to
+   `authenticate_keyboard_interactive`, feeding the same password to the prompt response(s).
+   - The password is requested **once per run**: dsync opens a single authenticated `russh`
+     connection and then opens the channel pool on it (see Concurrency below), so the password
+     is entered once and never re-prompted per channel.
+   - **Non-interactive contexts** — no TTY, `--server` mode, or `--quiet` (treated as
+     non-interactive) — skip the prompt entirely and fail with the guidance error below, so
+     automation/CI never hangs waiting on input.
+   - The password lives only in memory for the duration of auth; it is never logged and never
+     written to config.
+
+If all methods fail, error with `DsyncError::Ssh` describing the full chain, e.g.
+*"authentication failed for {user}; tried ssh-agent, key files (id_ed25519/id_rsa + ssh_config
+IdentityFile), and password (a password prompt is only shown on an interactive terminal)."*
+
 - **Spawn agent:** open an SSH `exec` channel running `dsync --server` on the remote (the
   binary must be on the remote `PATH`; document this and surface a clear error if missing).
   The channel's stdin/stdout carry the wire protocol below.
@@ -163,6 +203,13 @@ First exchange includes a protocol version + the remote root path. Mismatched ve
 ## Edge cases
 - Remote `dsync` missing / not on PATH → clear `DsyncError::Ssh` telling the user to install
   `dsync` on the remote.
+- No usable key and not an interactive terminal (no TTY, `--server`, or `--quiet`) → the
+  password prompt is suppressed and auth fails fast with the guidance message, never blocking
+  on input.
+- `~/.ssh/config` absent, or the host token matches no `Host` alias → use the token as a literal
+  hostname with built-in defaults (no error).
+- ssh_config `IdentityFile` that is passphrase-protected and cannot be loaded non-interactively
+  → skip that key and fall through to the next auth method (ultimately the password prompt).
 - Connection drop mid-transfer → abort with an error; because `patch` renames atomically, no
   partial files remain. The next run resumes naturally (only changed files re-transfer).
 - Permission denied on remote path → `Response::Error` → `DsyncError`.
@@ -175,6 +222,10 @@ First exchange includes a protocol version + the remote root path. Mismatched ve
 ## Dependencies
 - [delta-algorithm.md](delta-algorithm.md) (`Signature`, `Delta`), [ignore.md](ignore.md)
   (`IgnoreSet`), [config.md](config.md) (`Remote`, compression settings).
+- An `~/.ssh/config` parser (e.g. the `ssh2-config` crate) to resolve host aliases
+  (HostName/User/Port/IdentityFile).
+- A hidden-input prompt for the password step — reuse `dialoguer`'s `Password` (already in
+  `Cargo.toml`) or add `rpassword`.
 - Consumed by [sync-engine.md](sync-engine.md).
 
 ## Acceptance criteria
@@ -183,3 +234,10 @@ First exchange includes a protocol version + the remote root path. Mismatched ve
 - Round-trip over a loopback SSH connection (integration/manual test) reproduces a local sync.
 - Protocol frames are length-prefixed and version-checked; compression toggles via config/flag.
 - `patch` is atomic (temp file + rename); an interrupted run leaves no partial files.
+- A target using an `~/.ssh/config` alias (e.g. `myvm:/data/test`) connects using the alias's
+  `HostName`, `User`, `Port`, and `IdentityFile`.
+- An explicit `user@` or `ssh://…:port` in the remote string overrides the ssh_config `User`/`Port`.
+- On an interactive terminal, a host with no usable key prompts once and authenticates via
+  password — and via `keyboard-interactive` when that is the only method the server offers.
+- The same key-less host in a non-TTY context fails fast with the guidance message instead of
+  hanging on a prompt.

@@ -107,7 +107,7 @@ async fn build_dst(remote: &Remote, opts: &SyncOptions) -> Result<Endpoint> {
             Ok(Endpoint::Local(Arc::new(LocalTransport::new(abs))))
         }
         Remote::Ssh { .. } => {
-            let t = SshTransport::connect(remote, opts.threads, opts.compress, opts.compression_level).await?;
+            let t = SshTransport::connect(remote, opts.threads, opts.compress, opts.compression_level, opts.quiet).await?;
             Ok(Endpoint::Ssh(Arc::new(t)))
         }
     }
