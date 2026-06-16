@@ -46,7 +46,12 @@ Arguments:
 
 Options:
   -n, --dry-run        List what would change without transferring anything.
-  -j, --threads <N>    Worker threads (overrides config; 0 = num CPUs).
+  -j, --threads <N>    Processing workers for local delta/hash work
+                       (overrides config; 0 = num CPUs).
+  -J, --transfer-threads <N>
+                       Concurrent SSH transfer channels (overrides config;
+                       default 1). Each is a remote SSH session — keep ≤ the
+                       remote sshd's MaxSessions (default 10).
       --no-compress    Disable zstd compression for this run.
       --checksum       Force full-content hashing for change detection
                        (ignore the size+mtime fast path).
@@ -130,6 +135,7 @@ struct SyncArgs {
     remote: Option<String>,   // positional; None => the `default` remote
     #[arg(short = 'n', long)] dry_run: bool,
     #[arg(short = 'j', long)] threads: Option<usize>,
+    #[arg(short = 'J', long)] transfer_threads: Option<usize>,
     #[arg(long)] no_compress: bool,
     #[arg(long)] checksum: bool,
     #[arg(long, overrides_with = "no_delete", default_value_t = true)] delete: bool,

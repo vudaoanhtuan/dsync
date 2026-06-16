@@ -53,9 +53,12 @@ pub struct SyncArgs {
     /// List what would change without transferring anything
     #[arg(short = 'n', long)]
     pub dry_run: bool,
-    /// Worker threads (overrides config; 0 = num CPUs)
+    /// Processing workers for local delta/hash work (overrides config; 0 = num CPUs)
     #[arg(short = 'j', long)]
     pub threads: Option<usize>,
+    /// Concurrent SSH transfer channels (overrides config; keep ≤ remote sshd MaxSessions, default 10)
+    #[arg(short = 'J', long)]
+    pub transfer_threads: Option<usize>,
     /// Disable zstd compression for this run
     #[arg(long)]
     pub no_compress: bool,
@@ -133,11 +136,16 @@ async fn sync_command(direction: SyncDirection, args: SyncArgs) -> Result<()> {
     let compress = if args.no_compress { false } else { cfg.compression };
     let delete = !args.no_delete; // --no-delete wins
     let threads = resolve_threads(args.threads.unwrap_or(cfg.threads));
+    let transfer_threads = args
+        .transfer_threads
+        .unwrap_or(cfg.transfer_threads)
+        .max(1);
 
     let opts = SyncOptions {
         direction,
         dry_run: args.dry_run,
         threads,
+        transfer_threads,
         compress,
         compression_level: cfg.compression_level,
         checksum: args.checksum,

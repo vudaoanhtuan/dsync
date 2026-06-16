@@ -17,6 +17,7 @@ fn make_config(dst: &Path, ignore: &str) -> Config {
         compression: true,
         compression_level: 3,
         threads: 0,
+        transfer_threads: 1,
         delta_size_cap: 536_870_912,
     }
 }
@@ -26,6 +27,7 @@ fn opts(direction: SyncDirection, delete: bool) -> SyncOptions {
         direction,
         dry_run: false,
         threads: 4,
+        transfer_threads: 1,
         compress: false,
         compression_level: 3,
         checksum: false,

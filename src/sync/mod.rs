@@ -36,8 +36,12 @@ impl SyncDirection {
 pub struct SyncOptions {
     pub direction: SyncDirection,
     pub dry_run: bool,
-    /// Already-resolved worker count (0 mapped to num_cpus, then clamped — see config.md).
+    /// Already-resolved processing-worker count (0 mapped to num_cpus, then clamped — see
+    /// config.md). Bounds local CPU-bound delta/hash concurrency.
     pub threads: usize,
+    /// Concurrent SSH transfer channels (≥ 1). Bounds remote round-trip parallelism; kept low so
+    /// it doesn't exceed the remote sshd's `MaxSessions`.
+    pub transfer_threads: usize,
     pub compress: bool,
     pub compression_level: i32,
     pub checksum: bool,
@@ -107,7 +111,7 @@ async fn build_dst(remote: &Remote, opts: &SyncOptions) -> Result<Endpoint> {
             Ok(Endpoint::Local(Arc::new(LocalTransport::new(abs))))
         }
         Remote::Ssh { .. } => {
-            let t = SshTransport::connect(remote, opts.threads, opts.compress, opts.compression_level, opts.quiet).await?;
+            let t = SshTransport::connect(remote, opts.transfer_threads, opts.compress, opts.compression_level, opts.quiet).await?;
             Ok(Endpoint::Ssh(Arc::new(t)))
         }
     }

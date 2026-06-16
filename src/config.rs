@@ -21,6 +21,9 @@ fn default_level() -> i32 {
 fn default_delta_cap() -> u64 {
     536_870_912 // 512 MiB
 }
+fn default_transfer_threads() -> usize {
+    1
+}
 
 /// The per-directory configuration, persisted as `.dsync/config.yaml`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -34,8 +37,13 @@ pub struct Config {
     pub compression: bool,
     #[serde(default = "default_level")]
     pub compression_level: i32,
+    /// Processing workers (CPU-bound local delta/hash work). 0 => num CPUs.
     #[serde(default)]
     pub threads: usize,
+    /// Concurrent SSH transfer channels. Kept low by default because each channel is a remote
+    /// SSH session, and most sshd configs cap concurrent sessions (`MaxSessions`, default 10).
+    #[serde(default = "default_transfer_threads")]
+    pub transfer_threads: usize,
     #[serde(default = "default_delta_cap")]
     pub delta_size_cap: u64,
 }
@@ -51,6 +59,7 @@ impl Config {
             compression: true,
             compression_level: 3,
             threads: 0,
+            transfer_threads: default_transfer_threads(),
             delta_size_cap: default_delta_cap(),
         }
     }

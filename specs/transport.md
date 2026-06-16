@@ -137,13 +137,18 @@ its response), so concurrent calls must **not** share a single channel — inter
 one stdin/stdout would corrupt the stream. Design:
 
 - `SshTransport` opens **one** authenticated `russh` connection, then opens a **pool of N exec
-  channels** (`N = opts.threads`), each running its own `dsync --server` process. SSH natively
-  multiplexes independent channels over the single connection.
+  channels** (`N = opts.transfer_threads`, default 1), each running its own `dsync --server`
+  process. SSH natively multiplexes independent channels over the single connection. The channel
+  count is deliberately **decoupled** from `opts.threads`: each channel is a remote SSH session,
+  and most sshd configs cap concurrent sessions (`MaxSessions`, default 10), so opening one
+  channel per processing worker would fail on hosts with more cores than that limit.
 - Each channel owns an independent synchronous request/response loop. A worker checks out a
   channel from the pool (e.g. an `async` semaphore + `Vec<AgentChannel>` guarded by a `Mutex`,
   or an `mpsc` of idle channels), issues its round-trip, and returns the channel.
-- Pool size is bounded by `opts.threads`, so the SSH transport never has more in-flight requests
-  than worker permits; remote CPU work parallelizes across the N agent processes too.
+- Pool size is bounded by `opts.transfer_threads`, so the SSH transport never has more in-flight
+  round-trips than transfer channels. The up-to-`opts.threads` processing workers still run their
+  local CPU-bound delta/hash work in parallel; they serialize only on the shared channel pool when
+  they need a remote round-trip.
 - The handshake (version + remote root) happens **once per channel** as it is opened. The
   one-time `scan` of the remote root runs on any single channel before Stage 3 fan-out.
 - On `Shutdown`/EOF each agent process exits; closing the connection tears down all channels.

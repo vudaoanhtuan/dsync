@@ -52,8 +52,12 @@ compression: true
 # Optional. zstd compression level 1..=19. Default: 3.
 compression_level: 3
 
-# Optional. Worker threads for hashing/transfer. Default: 0 = number of CPU cores.
+# Optional. Processing workers for local delta/hash work. Default: 0 = number of CPU cores.
 threads: 0
+
+# Optional. Concurrent SSH transfer channels (each is a remote SSH session). Default: 1.
+# Keep at or below the remote sshd's MaxSessions (default 10) or channel opens fail.
+transfer_threads: 1
 
 # Optional. Max file size (bytes) eligible for the delta path; larger files use the
 # whole-file fast path (spec 5). Default: 536870912 (512 MiB).
@@ -74,7 +78,9 @@ pub struct Config {
     #[serde(default = "default_level")]
     pub compression_level: i32,        // 1..=19
     #[serde(default)]
-    pub threads: usize,                // 0 => num_cpus
+    pub threads: usize,                // 0 => num_cpus (local processing workers)
+    #[serde(default = "default_transfer_threads")]
+    pub transfer_threads: usize,       // default 1; concurrent SSH transfer channels
     #[serde(default = "default_delta_cap")]
     pub delta_size_cap: u64,           // bytes; files above this skip the delta path
 }
@@ -152,6 +158,9 @@ The selected entry's path is parsed via `Remote::parse` to build the destination
 - `threads` resolution happens **once**, where the effective `SyncOptions` is assembled (CLI
   flag → config → default): `0` maps to num_cpus; a value larger than `cores × 4` is clamped to
   that max with a warning. `SyncOptions.threads` is therefore always a final, resolved count.
+- `transfer_threads` is resolved the same way (CLI flag → config → default 1) and clamped to a
+  minimum of 1. It bounds the SSH transfer-channel pool only; it is independent of `threads`
+  (which bounds local processing). Keep it ≤ the remote sshd's `MaxSessions` (default 10).
 
 ## Dependencies
 - Used by [cli.md](cli.md) (init/remote commands, runtime overrides), [ignore.md](ignore.md)

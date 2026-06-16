@@ -105,8 +105,10 @@ pub struct SshTransport {
 
 impl SshTransport {
     /// Connect, authenticate, and open a pool of `channels` agent processes rooted at the remote
-    /// path. `compress`/`level` control wire compression for this run. `quiet` suppresses the
-    /// interactive password prompt (so `--quiet`/automation never blocks on input).
+    /// path. `channels` is the SSH *transfer* concurrency (one remote SSH session each) and is
+    /// distinct from the local processing-worker count; keep it at or below the remote sshd's
+    /// `MaxSessions` (default 10). `compress`/`level` control wire compression for this run.
+    /// `quiet` suppresses the interactive password prompt (so `--quiet`/automation never blocks).
     pub async fn connect(
         remote: &Remote,
         channels: usize,
